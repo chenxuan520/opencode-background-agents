@@ -1,4 +1,4 @@
-# opencode-background-agents
+# @chenxuan520/opencode-background-agents
 
 > Keep working while research runs in the background. Your work survives context compaction.
 
@@ -14,18 +14,40 @@ Background agents solve this:
 - **Survive compaction** - Results are saved to disk as markdown. When context gets tight, the AI knows exactly where to retrieve past research.
 - **Fire and forget** - Use the "waiter model": you don't follow the waiter to the kitchen. A notification arrives when your order is ready.
 
-## Installation
+## Install
+
+Preferred install command:
 
 ```bash
-ocx add kdco/background-agents --from https://registry.kdco.dev
+opencode plugin @chenxuan520/opencode-background-agents@latest --global
 ```
 
-If you don't have OCX installed, install it from the [OCX repository](https://github.com/kdcokenny/ocx).
-
-**Optional:** Install `kdco-workspace` for the full experience—it bundles background agents with specialist agents, planning tools, and research protocols:
+Verified release at the time of writing:
 
 ```bash
-ocx add kdco/workspace --from https://registry.kdco.dev
+opencode plugin @chenxuan520/opencode-background-agents@0.1.5 --global
+```
+
+If you only want it in the current project instead of globally, omit `--global`:
+
+```bash
+opencode plugin @chenxuan520/opencode-background-agents@latest
+```
+
+This package exposes a standard OpenCode server plugin entrypoint via `exports["./server"]`, so it installs through the normal npm plugin flow. OCX is not required.
+
+For a global install, OpenCode writes the plugin entry into:
+
+`~/.config/opencode/opencode.json`
+
+Example result:
+
+```json
+{
+  "plugin": [
+    "@chenxuan520/opencode-background-agents@0.1.5"
+  ]
+}
 ```
 
 ## How It Works
@@ -60,16 +82,9 @@ The plugin adds three tools:
 | `delegation_read(id)` | Retrieve a specific result |
 | `delegation_list()` | List all delegations with titles and summaries |
 
-## Limitations
+## Notes
 
-### Read-Only Sub-Agents Only
-
-Only read-only sub-agents (permissions: `edit=deny`, `write=deny`, `bash={"*":"deny"}`) can use `delegate`.
-Any write-capable sub-agent (any write/edit/bash allow) must use the native `task` tool.
-
-**Why?** Background delegations run in isolated sessions outside OpenCode's session tree. The undo/branching system cannot track changes made in background sessions—reverting would not affect these changes, risking unexpected data loss.
-
-> A workaround is being explored.
+This fork blocks delegation in child/subagent sessions and rejects `delegate()` calls that target `mode: subagent` agents. Use native subagent/task flow for subagents, and keep background delegation in parent sessions only.
 
 ### Timeout
 
@@ -81,9 +96,9 @@ This is plugin-compatible lifecycle parity, not runtime-internal parity. It does
 
 - Claude/OpenCode internal AppState/task queue internals
 - runtime notification priority controls
-- write-capable background execution with native undo/branching parity
+- runtime-native undo/branching parity for detached background execution
 
-Write-capable sub-agents should continue to use native `task`.
+Detached background execution still does not provide runtime-native undo/branching guarantees for side effects, and subagents should continue to use native subagent/task flow.
 
 ### Real-Time Monitoring
 
@@ -113,33 +128,38 @@ The opposite - it *saves* context. Heavy research runs in a separate sub-agent s
 
 Claude's native task tool runs sub-agents but results can be lost when context compacts. This plugin adds a persistence layer - results are written to markdown files, so the AI always knows where to find them.
 
-### Why install via OCX?
+## Local Development
 
-One command, auto-configured, registry-backed updates. You could copy the files manually, but you'd need to handle dependencies (`unique-names-generator`) and updates yourself.
+Build the package locally:
 
-## Manual Installation
+```bash
+npm install
+npm run build
+```
 
-If you prefer not to use OCX, copy the source files from [`src/`](./src) to `.opencode/plugin/background-agents.ts`.
+For local file-based testing without publishing to npm, point OpenCode at the built server entry:
 
-**Caveats:**
-- Manually install dependencies (`unique-names-generator`)
-- Updates require manual re-copying
+```json
+{
+  "plugin": [
+    "file:///absolute/path/to/opencode-background-agents/dist/server.js"
+  ]
+}
+```
 
-## Part of the OCX Ecosystem
+If OpenCode is already running, restart it after installation or after rebuilding the package.
 
-This plugin is part of the [KDCO Registry](https://github.com/kdcokenny/ocx/tree/main/registry/src/kdco). For the full experience, check out [kdco-workspace](https://github.com/kdcokenny/ocx) which bundles background agents with specialist agents, planning tools, and notification support.
+For a release-ready check, run:
+
+```bash
+npm run typecheck
+npm run build
+npm pack --dry-run
+```
 
 ## Contributing
 
-This facade is maintained from the main [OCX monorepo](https://github.com/kdcokenny/ocx).
-
-If you want to update opencode-background-agents itself, start here:
-
-- https://github.com/kdcokenny/ocx/blob/main/workers/kdco-registry/files/plugins/background-agents.ts
-
-- Open issues here: https://github.com/kdcokenny/ocx/issues/new
-- Open pull requests here: https://github.com/kdcokenny/ocx/compare
-- Please do **not** open issues or PRs in this facade repository.
+This repository is now a standalone npm-distributed OpenCode plugin. The implementation is still based on the original KDCO background-agents work, but it no longer requires OCX for installation.
 
 ## Disclaimer
 

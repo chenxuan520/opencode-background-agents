@@ -11,9 +11,9 @@
 import * as crypto from "node:crypto"
 import { stat } from "node:fs/promises"
 import * as path from "node:path"
-import { logWarn } from "./log-warn"
-import type { OpencodeClient } from "./types"
-import { TimeoutError, withTimeout } from "./with-timeout"
+import { logWarn } from "./log-warn.js"
+import type { OpencodeClient } from "./types.js"
+import { TimeoutError, withTimeout } from "./with-timeout.js"
 
 /**
  * Generate a short hash from a path for project ID fallback.

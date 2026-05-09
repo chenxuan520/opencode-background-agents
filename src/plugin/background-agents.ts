@@ -15,8 +15,8 @@ import * as path from "node:path"
 import { type Plugin, type ToolContext, tool } from "@opencode-ai/plugin"
 import type { Event, Message, Part, TextPart } from "@opencode-ai/sdk"
 import { adjectives, animals, colors, uniqueNamesGenerator } from "unique-names-generator"
-import { getProjectId } from "./kdco-primitives/get-project-id"
-import type { OpencodeClient } from "./kdco-primitives/types"
+import { getProjectId } from "./kdco-primitives/get-project-id.js"
+import type { OpencodeClient } from "./kdco-primitives/types.js"
 
 // ==========================================
 // READABLE ID GENERATION
@@ -284,90 +284,6 @@ function createLogger(client: OpencodeClient) {
 
 type Logger = ReturnType<typeof createLogger>
 
-// ==========================================
-// AGENT CAPABILITY DETECTION
-// ==========================================
-
-/**
- * Parse agent mode at boundary.
- * Returns trusted type indicating if agent is a sub-agent.
- */
-async function parseAgentMode(
-	client: OpencodeClient,
-	agentName: string,
-	log: Logger,
-): Promise<{ isSubAgent: boolean }> {
-	try {
-		const result = await client.app.agents({})
-		const agents = (result.data ?? []) as { name: string; mode?: string }[]
-		const agent = agents.find((a) => a.name === agentName)
-		return { isSubAgent: agent?.mode === "subagent" }
-	} catch (error) {
-		// Fail-safe: Agent list errors shouldn't block task calls
-		// Fail-loud: Log for observability
-		log.warn(
-			`Agent list fetch failed for "${agentName}", assuming non-sub-agent: ${error instanceof Error ? error.message : String(error)}`,
-		)
-		return { isSubAgent: false }
-	}
-}
-
-/**
- * Permission entry type: simple value or pattern object.
- * Matches CLI schema: z.union([z.enum(["ask", "allow", "deny"]), z.record(z.enum(...))])
- */
-type PermissionEntry = "ask" | "allow" | "deny" | Record<string, "ask" | "allow" | "deny">
-
-/**
- * Check if a permission entry denies access (Law 4: Fail Fast).
- * Handles both simple values ("deny") and pattern objects ({ "*": "deny" }).
- */
-function isPermissionDenied(entry: PermissionEntry | undefined): boolean {
-	if (entry === undefined) return false
-	if (entry === "deny") return true
-	if (typeof entry === "object" && entry["*"] === "deny") return true
-	return false
-}
-
-/**
- * Parse agent write capability at boundary.
- * Returns trusted type indicating if agent is read-only.
- *
- * An agent is read-only when ALL of: edit, write, and bash are denied.
- * Permission schema supports both simple ("deny") and pattern ({ "*": "deny" }) values.
- */
-async function parseAgentWriteCapability(
-	client: OpencodeClient,
-	agentName: string,
-	log: Logger,
-): Promise<{ isReadOnly: boolean }> {
-	try {
-		const config = await client.config.get()
-		const configData = config.data as {
-			agent?: Record<
-				string,
-				{
-					permission?: Record<string, PermissionEntry>
-				}
-			>
-		}
-		const permission = configData?.agent?.[agentName]?.permission ?? {}
-
-		const editDenied = isPermissionDenied(permission.edit)
-		const writeDenied = isPermissionDenied(permission.write)
-		const bashDenied = isPermissionDenied(permission.bash)
-
-		return { isReadOnly: editDenied && writeDenied && bashDenied }
-	} catch (error) {
-		// Fail-safe: Config errors shouldn't block task calls
-		// Fail-loud: Log for observability
-		log.warn(
-			`Config fetch failed for "${agentName}", assuming write-capable: ${error instanceof Error ? error.message : String(error)}`,
-		)
-		return { isReadOnly: false }
-	}
-}
-
 /**
  * DELEGATION MANAGER
  */
@@ -399,6 +315,7 @@ function parsePersistedStatus(raw: string | undefined): DelegationStatus {
 export class DelegationManager {
 	private delegations: Map<string, DelegationRecord> = new Map()
 	private delegationsBySession: Map<string, string> = new Map()
+	private childSessionCache: Map<string, boolean> = new Map()
 	private terminalWaiters: Map<string, { promise: Promise<void>; resolve: () => void }> = new Map()
 	private timeoutTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
 	private client: OpencodeClient
@@ -453,6 +370,22 @@ export class DelegationManager {
 			}
 		}
 		return currentID
+	}
+
+	async isChildSession(sessionID: string): Promise<boolean> {
+		const cached = this.childSessionCache.get(sessionID)
+		if (cached !== undefined) return cached
+
+		try {
+			const session = await this.client.session.get({
+				path: { id: sessionID },
+			})
+			const isChild = Boolean(session.data?.parentID)
+			this.childSessionCache.set(sessionID, isChild)
+			return isChild
+		} catch {
+			return false
+		}
 	}
 
 	/**
@@ -1011,24 +944,16 @@ export class DelegationManager {
 		const validAgent = agents.find((a) => a.name === input.agent)
 
 		if (!validAgent) {
-			const available = agents
-				.filter((a) => a.mode === "subagent" || a.mode === "all" || !a.mode)
-				.map((a) => `• ${a.name}${a.description ? ` - ${a.description}` : ""}`)
-				.join("\n")
+			const available = agents.map((a) => `• ${a.name}${a.description ? ` - ${a.description}` : ""}`).join("\n")
 
 			throw new Error(
 				`Agent "${input.agent}" not found.\n\nAvailable agents:\n${available || "(none)"}`,
 			)
 		}
 
-		// Check if agent is read-only (Early Exit + Fail Fast)
-		const { isReadOnly } = await parseAgentWriteCapability(this.client, input.agent, this.log)
-		if (!isReadOnly) {
+		if (validAgent.mode === "subagent") {
 			throw new Error(
-				`Agent "${input.agent}" is write-capable and requires the native \`task\` tool for proper undo/branching support.\n\n` +
-					`Use \`task\` instead of \`delegate\` for write-capable agents.\n\n` +
-					`Read-only sub-agents (edit/write/bash denied) use \`delegate\`.\n` +
-					`Write-capable sub-agents (any write permission) use \`task\`.`,
+				`Agent "${input.agent}" is a subagent and cannot be used with delegate(). Use the native subagent/task flow instead.`,
 			)
 		}
 
@@ -1071,19 +996,12 @@ export class DelegationManager {
 
 		// Fire the prompt (using prompt() instead of promptAsync() to properly initialize agent loop)
 		// Agent param is critical for MCP tools - tells OpenCode which agent's config to use
-		// Anti-recursion: disable nested delegations and state-modifying tools via tools config
 		this.client.session
 			.prompt({
 				path: { id: delegation.sessionID },
 				body: {
 					agent: input.agent,
 					parts: [{ type: "text", text: input.prompt }],
-					tools: {
-						task: false,
-						delegate: false,
-						todowrite: false,
-						plan_save: false,
-					},
 				},
 			})
 			.catch((error: Error) => {
@@ -1514,17 +1432,19 @@ Use this for:
 - Parallel work that can run in background
 - Any task where you want persistent, retrievable output
 
-On completion, a notification will arrive with the ID and terminal summary.
-Use \`delegation_read\` with the ID to retrieve full persisted output (including after compaction).`,
+		On completion, a notification will arrive with the ID and terminal summary.
+		Use \`delegation_read\` with the ID to retrieve full persisted output (including after compaction).
+
+		Not supported:
+		- child/subagent sessions
+		- subagent targets (use native subagent/task flow instead).`,
 		args: {
 			prompt: tool.schema
 				.string()
 				.describe("The full detailed prompt for the agent. Must be in English."),
 			agent: tool.schema
 				.string()
-				.describe(
-					'Agent to delegate to. Must be a read-only sub-agent (edit/write/bash denied), such as "researcher" or "explore".',
-				),
+				.describe("Agent to delegate to. Can be any available agent name."),
 		},
 		async execute(args: DelegateArgs, toolCtx: ToolContext): Promise<string> {
 			if (!toolCtx?.sessionID) {
@@ -1532,6 +1452,9 @@ Use \`delegation_read\` with the ID to retrieve full persisted output (including
 			}
 			if (!toolCtx?.messageID) {
 				return "❌ delegate requires messageID. This is a system error."
+			}
+			if (await manager.isChildSession(toolCtx.sessionID)) {
+				return "❌ delegate is disabled in child/subagent sessions. Return the issue to the parent agent instead."
 			}
 
 			try {
@@ -1565,13 +1488,18 @@ Use \`delegation_read\` with the ID to retrieve full persisted output (including
 function createDelegationRead(manager: DelegationManager): ReturnType<typeof tool> {
 	return tool({
 		description: `Read the output of a delegation by its ID.
-Use this to retrieve results from delegated tasks if the inline notification was lost during compaction.`,
+		Use this to retrieve results from delegated tasks if the inline notification was lost during compaction.
+
+		Not supported in child/subagent sessions.`,
 		args: {
 			id: tool.schema.string().describe("The delegation ID (e.g., 'elegant-blue-tiger')"),
 		},
 		async execute(args: { id: string }, toolCtx: ToolContext): Promise<string> {
 			if (!toolCtx?.sessionID) {
 				return "❌ delegation_read requires sessionID. This is a system error."
+			}
+			if (await manager.isChildSession(toolCtx.sessionID)) {
+				return "❌ delegation_read is disabled in child/subagent sessions. Return the issue to the parent agent instead."
 			}
 
 			return await manager.readOutput(toolCtx.sessionID, args.id)
@@ -1582,11 +1510,16 @@ Use this to retrieve results from delegated tasks if the inline notification was
 function createDelegationList(manager: DelegationManager): ReturnType<typeof tool> {
 	return tool({
 		description: `List all delegations for the current session.
-Shows both running and completed delegations.`,
+		Shows both running and completed delegations.
+
+		Not supported in child/subagent sessions.`,
 		args: {},
 		async execute(_args: Record<string, never>, toolCtx: ToolContext): Promise<string> {
 			if (!toolCtx?.sessionID) {
 				return "❌ delegation_list requires sessionID. This is a system error."
+			}
+			if (await manager.isChildSession(toolCtx.sessionID)) {
+				return "❌ delegation_list is disabled in child/subagent sessions. Return the issue to the parent agent instead."
 			}
 
 			const delegations = await manager.listDelegations(toolCtx.sessionID)
@@ -1623,23 +1556,19 @@ You have tools for parallel background work:
 
 ## Delegation Routing
 
-Agents route based on their permissions:
+Delegate any available agent when you want async background execution with persisted output.
+Use native \`task\` when you explicitly want inline execution that keeps the parent waiting.
 
-| Agent Type | Tool | Why |
-|------------|------|-----|
-| Read-only sub-agents (edit/write/bash denied) | \`delegate\` | Background session, async |
-| Write-capable sub-agents (any write permission) | \`task\` | Native task, preserves undo/branching |
-
-**Read-only sub-agents** have edit="deny", write="deny", bash={"*":"deny"}.
-**Write-capable sub-agents** have any write tool enabled.
+This fork does **not** enforce permission-based routing for \`delegate\`. Any available agent may be delegated.
+Be aware that detached background sessions do not provide native undo/branching guarantees for side effects.
 
 ## How It Works
 
-1. For read-only sub-agents: Call \`delegate\` with detailed prompt
-2. For write-capable sub-agents: Call \`task\` with detailed prompt
-3. Continue productive work while it runs
-4. Receive notification when complete
-5. Call \`delegation_read(id)\` to retrieve results
+1. Call \`delegate\` with detailed prompt for async background work
+2. Continue productive work while it runs
+3. Receive notification when complete
+4. Call \`delegation_read(id)\` to retrieve results
+5. Use \`task\` only when you intentionally want inline/native execution instead
 
 ## Critical Constraints
 
@@ -1779,45 +1708,9 @@ export const BackgroundAgentsPlugin: Plugin = async (ctx) => {
 			delegation_list: createDelegationList(manager),
 		},
 
-		// Prevent read-only agents from using native task tool (symmetric to delegate enforcement)
-		"tool.execute.before": async (
-			input: { tool: string },
-			output: { args?: { subagent_type?: string } },
-		) => {
-			// Guard: Only intercept task tool
-			if (input.tool !== "task") return
-
-			// Guard: Require agent name
-			const agentName = output.args?.subagent_type
-			if (!agentName) return
-
-			// Parse boundary 1: Check agent mode
-			const { isSubAgent } = await parseAgentMode(client as OpencodeClient, agentName, log)
-
-			// Guard: Allow non-sub-agents (main/built-in)
-			if (!isSubAgent) return
-
-			// Parse boundary 2: Check write capability (only for sub-agents)
-			const { isReadOnly } = await parseAgentWriteCapability(
-				client as OpencodeClient,
-				agentName,
-				log,
-			)
-
-			// Guard: Allow write-capable agents
-			if (!isReadOnly) return
-
-			// Fail fast: Read-only sub-agent via task is invalid
-			throw new Error(
-				`❌ Agent '${agentName}' is read-only and should use the delegate tool for async background execution.\n\n` +
-					`Read-only agents have: edit="deny", write="deny", bash={"*":"deny"}\n` +
-					`Use delegate for read-only sub-agents.\n` +
-					`Use task for write-capable sub-agents.`,
-			)
-		},
-
 		// Inject delegation rules into system prompt
-		"experimental.chat.system.transform": async (_input: SystemTransformInput, output) => {
+		"experimental.chat.system.transform": async (input: SystemTransformInput, output) => {
+			if (input.sessionID && (await manager.isChildSession(input.sessionID))) return
 			output.system.push(DELEGATION_RULES)
 		},
 
@@ -1826,6 +1719,7 @@ export const BackgroundAgentsPlugin: Plugin = async (ctx) => {
 			input: { sessionID: string },
 			output: { context: string[]; prompt?: string },
 		) => {
+			if (await manager.isChildSession(input.sessionID)) return
 			const rootSessionID = await manager.getRootSessionID(input.sessionID)
 
 			// Running delegations in this root session tree

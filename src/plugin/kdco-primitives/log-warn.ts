@@ -7,7 +7,7 @@
  * @module kdco-primitives/log-warn
  */
 
-import type { OpencodeClient } from "./types"
+import type { OpencodeClient } from "./types.js"
 
 /**
  * Log a warning message via OpenCode client or console fallback.

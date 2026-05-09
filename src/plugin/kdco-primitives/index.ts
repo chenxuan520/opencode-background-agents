@@ -8,19 +8,19 @@
  */
 
 // Project identification
-export { getProjectId } from "./get-project-id"
+export { getProjectId } from "./get-project-id.js"
 
 // Logging
-export { logWarn } from "./log-warn"
+export { logWarn } from "./log-warn.js"
 // Concurrency
-export { Mutex } from "./mutex"
+export { Mutex } from "./mutex.js"
 // Shell escaping
-export { assertShellSafe, escapeAppleScript, escapeBash, escapeBatch } from "./shell"
+export { assertShellSafe, escapeAppleScript, escapeBash, escapeBatch } from "./shell.js"
 // Temp directory
-export { getTempDir } from "./temp"
+export { getTempDir } from "./temp.js"
 // Terminal detection
-export { isInsideTmux } from "./terminal-detect"
+export { isInsideTmux } from "./terminal-detect.js"
 // Types
-export type { OpencodeClient } from "./types"
+export type { OpencodeClient } from "./types.js"
 // Timeout handling
-export { TimeoutError, withTimeout } from "./with-timeout"
+export { TimeoutError, withTimeout } from "./with-timeout.js"
